@@ -79,6 +79,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     mapping(address => BugCriticality) public bugBountyCriticality;
 
     mapping(address => bool) public hasReward;
+    mapping(address => bool) public isDistributed;
 
     // Bug Criticality Enum
     enum BugCriticality {
@@ -535,22 +536,25 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     /**
      * @dev Distribute remaining tokens equally among all participants
      */
-    function distributeRemainingTokens() external onlyOwner onlyAfterTestnet {
+    function distributeRemainingTokens() external nonReentrant onlyAfterTestnet {
         // Calculate remaining bug bounty rewards
         require(hasReward[msg.sender], "No reward for user");
+        require(!isDistributed[msg.sender], "already distributed")
         uint256 totalClaimedAmount = calculateRemainingClaimedAmount();
         uint256 totalAllocationPercent = (BUG_BOUNTY_ALLOCATION_PERCENTAGE +
             DAPP_REWARD_ALLOCATION_PERCENTAGE +
             DEVELOPER_REWARD_ALLOCATION_PERCENTAGE);
 
         uint256 totalRewards = (totalSupply * totalAllocationPercent) / MAX_BPS;
-        if (totalRewards >= totalClaimedAmount) return;
+        require (totalRewards >= totalClaimedAmount, "No reward");
 
         uint256 availableRewardsToShare = totalRewards - totalClaimedAmount;
         require(
             Autheo.balanceOf(address(this)) >= availableRewardsToShare,
             "Contract doesnt have rewards for users"
         );
+
+        isDistributed[msg.sender] = True;
 
         uint256 allUsersLength = allUsers.length;
 
