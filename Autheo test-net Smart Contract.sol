@@ -22,7 +22,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant BUG_BOUNTY_ALLOCATION_PERCENTAGE = 3000; // 30%  of total supply
     uint256 public constant DAPP_REWARD_ALLOCATION_PERCENTAGE = 200; // 2%  of total supply
     uint256 public constant DEVELOPER_REWARD_ALLOCATION_PERCENTAGE = 100; // 1%  of total supply
-    uint256 private constant MAX_BPS = 10_000;
+    uint256 private constant MAX_BPS = 10000;
 
     // Fixed reward amounts
     uint256 public immutable MONTHLY_DAPP_REWARD = 5000 * SCALE;
@@ -118,7 +118,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
      * @dev Constructor
      * @param _tokenAddress Address of the ERC20 token contract
      */
-    constructor(address _tokenAddress, uint256 _stratTime) {
+    constructor(address _tokenAddress, uint256 _stratTime, address _initialAddress) Ownable(_initialAddress) {
         require(_tokenAddress != address(0), "Invalid token address");
         require(_stratTime > block.timestamp, "Invalid start time");
         Autheo = IERC20(_tokenAddress);
@@ -152,7 +152,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
             BUG_BOUNTY_ALLOCATION_PERCENTAGE) / MAX_BPS;
 
         lowRewardPerUser =
-            ((totalBugBountyAllocation * LOW_PERCENTAGE) / 100) /
+            ((totalBugBountyAllocation * LOW_PERCENTAGE) / 10000) /
             _lowBugBountyUsers.length;
 
         for (uint256 i = 0; i < _lowBugBountyUsers.length; ) {
@@ -539,7 +539,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     function distributeRemainingTokens() external nonReentrant onlyAfterTestnet {
         // Calculate remaining bug bounty rewards
         require(hasReward[msg.sender], "No reward for user");
-        require(!isDistributed[msg.sender], "already distributed")
+        require(!isDistributed[msg.sender], "already distributed");
         uint256 totalClaimedAmount = calculateRemainingClaimedAmount();
         uint256 totalAllocationPercent = (BUG_BOUNTY_ALLOCATION_PERCENTAGE +
             DAPP_REWARD_ALLOCATION_PERCENTAGE +
@@ -554,7 +554,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
             "Contract doesnt have rewards for users"
         );
 
-        isDistributed[msg.sender] = True;
+        isDistributed[msg.sender] = true;
 
         uint256 allUsersLength = allUsers.length;
 
