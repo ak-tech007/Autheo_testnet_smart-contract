@@ -22,16 +22,15 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant BUG_BOUNTY_ALLOCATION_PERCENTAGE = 3000; // 30%  of total supply
     uint256 public constant DAPP_REWARD_ALLOCATION_PERCENTAGE = 200; // 2%  of total supply
     uint256 public constant DEVELOPER_REWARD_ALLOCATION_PERCENTAGE = 100; // 1%  of total supply
-    uint256 private constant MAX_BPS = 10000;
+    uint256 private constant MAX_BPS = 10_000;
 
     // Fixed reward amounts
     uint256 public immutable MONTHLY_DAPP_REWARD = 5000 * SCALE;
-    uint256 public immutable MONTHLY_UPTIME_BONUS = 500 * SCALE;
-    uint256 public immutable DEVELOPER_DEPLOYMENT_REWARD = 1500 * SCALE;
+    uint256 public immutable MONTHLY_UPTIME_BONUS = 500 * SCALE; // more than three smart contract deployed and more than fitfteen txs
+    uint256 public immutable DEVELOPER_DEPLOYMENT_REWARD = 1500 * SCALE; // monthly reward
 
-    // Testnet period
-    uint256 public constant TESTNET_PERIOD = 90 days;
-    uint256 public immutable testnetStartTime;
+    // TGE status
+    bool public isTestnet;
 
     // Claim amounts
     uint256 public claimPerContractDeployer;
@@ -70,7 +69,6 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
         public isWhitelistedDappUsersForId;
 
     mapping(address => bool) public isContractDeploymentUsersClaimed;
-    // mapping(address => bool) public isDappUsersClaimedForId;
     mapping(address => bool) public isWhitelistedDappUsers;
     mapping(address => bool) public isDappUsersClaimed;
     mapping(address => bool) public isBugBountyUsersClaimed;
@@ -79,7 +77,8 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     mapping(address => BugCriticality) public bugBountyCriticality;
 
     mapping(address => bool) public hasReward;
-    mapping(address => bool) public isDistributed;
+
+    mapping(address => uint256) public lastContractDeploymentClaim;
 
     // Bug Criticality Enum
     enum BugCriticality {
@@ -94,22 +93,21 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     event Claimed(string claimType, address indexed user, uint256 time);
     event ClaimAmountUpdated(uint256 newClaimedAmount);
     event EmergencyWithdraw(address token, uint256 amount);
+    event TestnetStatusUpdated(bool status);
+    event DeveloperRewardDistributed(address indexed user, uint256 amount);
 
     error USER_HAS_NO_CLAIM(address user);
 
     // Modifiers
-    modifier onlyDuringTestnet() {
-        require(
-            block.timestamp <= testnetStartTime + TESTNET_PERIOD,
-            "Not in testnet period"
-        );
+    modifier whenTestnetInactive() {
+        require(!isTestnet, "Contract is in testnet mode");
         _;
     }
 
-    modifier onlyAfterTestnet() {
+    modifier onlyOwnerOrTestnetInactive() {
         require(
-            block.timestamp > testnetStartTime + TESTNET_PERIOD,
-            "Still in testnet period"
+            owner() == msg.sender || !isTestnet,
+            "Only owner can call during testnet"
         );
         _;
     }
@@ -118,25 +116,37 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
      * @dev Constructor
      * @param _tokenAddress Address of the ERC20 token contract
      */
-    constructor(address _tokenAddress, uint256 _stratTime, address _initialAddress) Ownable(_initialAddress) {
+    //  constructor(address _tokenAddress) Ownable(msg.sender) {
+    constructor(address _tokenAddress, address _initialAddress) Ownable(_initialAddress) {
         require(_tokenAddress != address(0), "Invalid token address");
-        require(_stratTime > block.timestamp, "Invalid start time");
         Autheo = IERC20(_tokenAddress);
-        testnetStartTime = _stratTime;
         totalSupply = Autheo.totalSupply();
+        isTestnet = true; // Start in testnet mode
+    }
+
+    /**
+     * @dev Toggle testnet status
+     * @param _status New testnet status
+     */
+    function setTestnetStatus(bool _status) external onlyOwner {
+        isTestnet = _status;
+        emit TestnetStatusUpdated(_status);
+
+        // Once testnet is set to false, distribute developer rewards
+        if (!isTestnet) {
+            distributeDeveloperRewards();
+            distributeDappRewards();
+        }
     }
 
     function setClaimPerContractDeployer(
         uint256 _claimAmount
     ) public onlyOwner {
-        // only owner should claim
         claimPerContractDeployer = _claimAmount;
-
         emit ClaimAmountUpdated(_claimAmount);
     }
 
     function setClaimPerDappUser(uint256 _claimAmount) public onlyOwner {
-        // only owner should claim
         claimPerDappUser = _claimAmount;
         emit ClaimAmountUpdated(_claimAmount);
     }
@@ -145,6 +155,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
      * @dev Register low criticality bug bounty users
      * @param _lowBugBountyUsers Array of addresses for low criticality bug bounties
      */
+
     function registerLowBugBountyUsers(
         address[] memory _lowBugBountyUsers
     ) external onlyOwner {
@@ -253,8 +264,7 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     function registerContractDeploymentUsers(
         address[] memory _contractDeploymentUsers
     ) external onlyOwner {
-        uint256 _contractDeploymentUsersLength = _contractDeploymentUsers
-            .length;
+        uint256 _contractDeploymentUsersLength = _contractDeploymentUsers.length;
 
         require(
             _contractDeploymentUsersLength > 0,
@@ -323,12 +333,43 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Claim rewards for whitelisted address
+     * @dev Distribute initial dApp rewards to all registered users
+     * Called automatically when testnet is set to false
+     */
+    function distributeDappRewards() internal {
+        uint256 dappRewardTotal = (totalSupply *
+            DAPP_REWARD_ALLOCATION_PERCENTAGE) / MAX_BPS;
+
+        // Calculate base reward per user
+        uint256 rewardPerUser = dappRewardTotal /
+            whitelistedDappRewardUsers.length;
+
+        for (uint256 i = 0; i < whitelistedDappRewardUsers.length; i++) {
+            address user = whitelistedDappRewardUsers[i];
+            require(user != address(0), "Invalid address");
+
+            uint256 userReward = rewardPerUser;
+
+            // Add uptime bonus if applicable
+            if (hasGoodUptime[user]) {
+                userReward += MONTHLY_UPTIME_BONUS;
+            }
+
+            // Transfer dApp rewards to the user
+            Autheo.safeTransfer(user, userReward);
+            totalDappRewardsClaimed += userReward;
+
+            emit Claimed("Initial DApp Distribution", user, block.timestamp);
+        }
+    }
+
+    /**
+     * @dev Claim rewards for whitelisted address - Only accessible when testnet is inactive
      */
     function claimReward(
         bool _contractDeploymentClaim,
         bool _bugBountyClaim
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant whenNotPaused whenTestnetInactive {
         if (_contractDeploymentClaim) {
             __contractDeploymentClaim(msg.sender);
         } else if (_bugBountyClaim) {
@@ -373,42 +414,66 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
     }
 
     function __contractDeploymentClaim(address _user) private {
-        // Check if user is whitelisted for one-time deployment claim
-        require(isWhitelistedContractDeploymentUsers[_user], "No reward yet");
-
-        // Add timeline checks here
+        // Check if user is whitelisted for deployment rewards
         require(
-            block.timestamp < testnetStartTime + TESTNET_PERIOD,
-            "Claim time out"
+            isWhitelistedContractDeploymentUsers[_user],
+            "User not eligible"
         );
 
-        // Check if user has claimed
+        // Ensure the user has not already claimed this month
         require(
-            !isContractDeploymentUsersClaimed[_user],
-            "User already claimed rewards"
+            block.timestamp >= lastContractDeploymentClaim[_user] + 30 days,
+            "Reward already claimed this month"
         );
 
-        // Reset user's claim to true
-        isContractDeploymentUsersClaimed[_user] = true;
+        // Update the last claim timestamp
+        lastContractDeploymentClaim[_user] = block.timestamp;
 
         // Track claim
-        totalContractDeploymentClaimed += claimPerContractDeployer;
+        totalContractDeploymentClaimed += DEVELOPER_DEPLOYMENT_REWARD;
 
-        // Transfer the amount to user
-        Autheo.safeTransfer(_user, claimPerContractDeployer);
+        // Transfer the reward
+        Autheo.safeTransfer(_user, DEVELOPER_DEPLOYMENT_REWARD);
 
         // Emit an event
-        emit Claimed("Contract Deployment", _user, block.timestamp);
+        emit Claimed(
+            "Monthly Contract Deployment Reward",
+            _user,
+            block.timestamp
+        );
     }
 
-    function claimDappRewards(uint256 _id) external nonReentrant whenNotPaused {
-        // Ensure that the address is a registered DApp user
+    /**
+     * @dev Distribute developer rewards to whitelisted contract deployers
+     */
+    function distributeDeveloperRewards() internal {
+        uint256 developerRewardTotal = (totalSupply *
+            DEVELOPER_REWARD_ALLOCATION_PERCENTAGE) / MAX_BPS;
+
+        uint256 rewardPerUser = developerRewardTotal /
+            whitelistedContractDeploymentUsers.length;
+
+        for (
+            uint256 i = 0;
+            i < whitelistedContractDeploymentUsers.length;
+            i++
+        ) {
+            address user = whitelistedContractDeploymentUsers[i];
+            require(user != address(0), "Invalid address");
+
+            // Transfer developer rewards to the user
+            Autheo.safeTransfer(user, rewardPerUser);
+            emit DeveloperRewardDistributed(user, rewardPerUser);
+        }
+    }
+
+    function claimDappRewards(
+        uint256 _id
+    ) external nonReentrant whenNotPaused whenTestnetInactive {
         require(
             isWhitelistedDappUsersForId[msg.sender][_id],
             "Not a registered Dapp user"
         );
-
-        // Ensure the user hasn't claimed this month's rewards already
         require(
             !hasClaimedForID[msg.sender][_id],
             "Already claimed rewards for this month"
@@ -416,7 +481,6 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
 
         uint256 rewardAmount = MONTHLY_DAPP_REWARD;
 
-        // If uptime is good, award the bonus
         if (hasGoodUptime[msg.sender]) {
             rewardAmount += MONTHLY_UPTIME_BONUS;
         }
@@ -531,41 +595,5 @@ contract AutheoRewardDistribution is Ownable, ReentrancyGuard, Pausable {
 
     function getAllUsers() external view returns (address[] memory) {
         return allUsers;
-    }
-
-    /**
-     * @dev Distribute remaining tokens equally among all participants
-     */
-    function distributeRemainingTokens() external nonReentrant onlyAfterTestnet {
-        // Calculate remaining bug bounty rewards
-        require(hasReward[msg.sender], "No reward for user");
-        require(!isDistributed[msg.sender], "already distributed");
-        uint256 totalClaimedAmount = calculateRemainingClaimedAmount();
-        uint256 totalAllocationPercent = (BUG_BOUNTY_ALLOCATION_PERCENTAGE +
-            DAPP_REWARD_ALLOCATION_PERCENTAGE +
-            DEVELOPER_REWARD_ALLOCATION_PERCENTAGE);
-
-        uint256 totalRewards = (totalSupply * totalAllocationPercent) / MAX_BPS;
-        require (totalRewards >= totalClaimedAmount, "No reward");
-
-        uint256 availableRewardsToShare = totalRewards - totalClaimedAmount;
-        require(
-            Autheo.balanceOf(address(this)) >= availableRewardsToShare,
-            "Contract doesnt have rewards for users"
-        );
-
-        isDistributed[msg.sender] = true;
-
-        uint256 allUsersLength = allUsers.length;
-
-        uint256 equalShares = availableRewardsToShare / allUsersLength;
-
-        Autheo.transfer(msg.sender, equalShares);
-
-        emit Claimed(
-            "Remaining Tokens Distributed",
-            msg.sender,
-            block.timestamp
-        );
     }
 }
